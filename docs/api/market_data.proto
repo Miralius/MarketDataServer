@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package marketdata;
+
+import "google/protobuf/empty.proto";
+
+// Публичный асинхронный API. Успешный Submit означает только принятие работы.
+service MarketDataService {
+  // INVALID_ARGUMENT: запрос не прошёл валидацию.
+  // RESOURCE_EXHAUSTED: очередь заполнена; job не создаётся.
+  // INTERNAL или UNAVAILABLE: задание не удалось надёжно сохранить.
+  rpc Submit(SubmitRequest) returns (SubmitResponse);
+  // Неизвестный job_id завершается NOT_FOUND.
+  // Пустой job_id завершается INVALID_ARGUMENT; недоступная БД — UNAVAILABLE,
+  // неожиданная ошибка чтения — INTERNAL.
+  // QUEUED, PROCESSING и FAILED возвращают только metadata; при FAILED metadata
+  // содержит error. Для обновления нетерминального статуса клиент повторяет RPC.
+  // Пустой COMPLETED также состоит только из metadata.
+  // Непустой COMPLETED сначала возвращает metadata, затем data chunks.
+  rpc GetResult(GetResultRequest) returns (stream ResultChunk);
+  // serving=true означает, что event loop работает и PostgresSQL доступна.
+  rpc Health(google.protobuf.Empty) returns (HealthResponse);
+}
+
+message SubmitRequest {
+  // Непустой идентификатор корреляции клиента; не входит в cache key.
+  string client_request_id = 1;
+  // Непустое имя настроенного поставщика данных.
+  string provider = 2;
+  // Должен быть установлен ровно один вариант запроса.
+  oneof request {
+    ReferenceDataRequest reference_data = 3;
+    HistoricalDataRequest historical_data = 4;
+  }
+}
+
+message SubmitResponse {
+  string job_id = 1;
+  // Обычно QUEUED; при exact cache hit может сразу быть COMPLETED.
+  OperationStatus status = 2;
+}
+
+message ReferenceDataRequest {
+  // securities и fields обязательны, не содержат пустых строк и дубликатов.
+  repeated string securities = 1;
+  repeated string fields = 2;
+}
+
+message HistoricalDataRequest {
+  // securities и fields обязательны, не содержат пустых строк и дубликатов.
+  repeated string securities = 1;
+  repeated string fields = 2;
+  // Формат YYYY-MM-DD; обе даты существуют, start_date <= end_date.
+  string start_date = 3;
+  string end_date = 4;
+  // Значение с каким периодом запрашиваются данные
+  Periodicity periodicity = 5;
+}
+
+message GetResultRequest {
+  string job_id = 1;
+}
+
+message ResultChunk {
+  // Нумерация начинается с 0 без пропусков; chunk 0 всегда metadata.
+  uint32 sequence_number = 1;
+
+  oneof payload {
+    ResultMetadata metadata = 2;
+    // Формат задан в metadata.content_type. Размер
+    // выбирается так, чтобы ResultChunk.ByteSize() не превышал 1 Mb.
+    bytes data = 3;
+  }
+}
+
+message ResultMetadata {
+  string job_id = 1;
+  OperationStatus status = 2;
+  uint64 total_size_bytes = 3;
+  uint32 data_chunk_count = 4;
+  // Тип и версия кодирования поля ResultChunk.data.
+  string content_type = 5;
+
+  // Заполняется только при OPERATION_STATUS_FAILED.
+  ErrorDetails error = 6;
+}
+
+message HealthResponse {
+  bool serving = 1;
+}
+
+// QUEUED -> PROCESSING -> COMPLETED или FAILED;
+// QUEUED также может перейти сразу в FAILED при ошибке до начала обработки.
+enum OperationStatus {
+  OPERATION_STATUS_UNSPECIFIED = 0; // Статус не задан; в ответах недопустим.
+  OPERATION_STATUS_QUEUED = 1;     // Job сохранена и ожидает обработки.
+  OPERATION_STATUS_PROCESSING = 2; // Запрос отправлен либо ожидает данные.
+  OPERATION_STATUS_COMPLETED = 3;  // Терминал: результат готов, в том числе пустой.
+  OPERATION_STATUS_FAILED = 4;     // Терминал: metadata содержит error.
+}
+
+enum Periodicity {
+  PERIODICITY_DAILY = 0;
+  PERIODICITY_WEEKLY = 1;
+  PERIODICITY_MONTHLY = 2;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_INVALID_PROVIDER_RESPONSE = 1;
+  ERROR_CODE_PROVIDER_UNAVAILABLE = 2;
+  ERROR_CODE_DEADLINE_EXCEEDED = 3;
+  ERROR_CODE_INTERNAL = 4;
+}
+
+message ErrorDetails {
+  // Код ошибки.
+  ErrorCode code = 1;
+  // Описание ошибки.
+  string message = 2;
+}
