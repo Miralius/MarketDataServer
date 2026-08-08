@@ -5,6 +5,10 @@ package marketdata;
 import "google/protobuf/empty.proto";
 
 // Публичный асинхронный API. Успешный Submit означает только принятие работы.
+// Временные ошибки транспорта поставщика, включая UNAVAILABLE, обрабатываются
+// сервером в фоне: та же операция повторяется через poll_interval не более
+// max_transient_retries раз (по умолчанию 1s и 3 попытки). Успешный ответ
+// сбрасывает счётчик последовательных ошибок, а общий deadline имеет приоритет.
 service MarketDataService {
   // INVALID_ARGUMENT: запрос не прошёл валидацию.
   // RESOURCE_EXHAUSTED: очередь заполнена; job не создаётся.
@@ -36,7 +40,8 @@ message SubmitRequest {
 
 message SubmitResponse {
   string job_id = 1;
-  // Обычно QUEUED; при exact cache hit может сразу быть COMPLETED.
+  // Обычно QUEUED; при exact cache hit может сразу быть COMPLETED. Retry связи с
+  // поставщиком не меняет job_id и не требует повторного Submit от клиента.
   OperationStatus status = 2;
 }
 
@@ -94,7 +99,7 @@ message HealthResponse {
 enum OperationStatus {
   OPERATION_STATUS_UNSPECIFIED = 0; // Статус не задан; в ответах недопустим.
   OPERATION_STATUS_QUEUED = 1;     // Job сохранена и ожидает обработки.
-  OPERATION_STATUS_PROCESSING = 2; // Запрос отправлен либо ожидает данные.
+  OPERATION_STATUS_PROCESSING = 2; // Запрос отправлен, ожидает данные или retry.
   OPERATION_STATUS_COMPLETED = 3;  // Терминал: результат готов, в том числе пустой.
   OPERATION_STATUS_FAILED = 4;     // Терминал: metadata содержит error.
 }
@@ -108,13 +113,15 @@ enum Periodicity {
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
   ERROR_CODE_INVALID_PROVIDER_RESPONSE = 1;
+  // Поставщик остался недоступен после исчерпания transient retry.
   ERROR_CODE_PROVIDER_UNAVAILABLE = 2;
   ERROR_CODE_DEADLINE_EXCEEDED = 3;
   ERROR_CODE_INTERNAL = 4;
 }
 
 message ErrorDetails {
-  // Код ошибки.
+  // Код терминальной ошибки. Промежуточные ошибки, для которых ещё
+  // доступны retry попытки, не публикуются как FAILED.
   ErrorCode code = 1;
   // Описание ошибки.
   string message = 2;
